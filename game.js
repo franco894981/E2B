@@ -30,7 +30,13 @@
   let timeLeft = GAME_SECONDS;
   let timerStarted = false;
   let timerStartTime = 0;
+  let bonusTime = 0;
+  let streak = 0;
   let messageUntil = 0;
+  let hoopMotionTime = 0;
+  let floatingEffects = [];
+  let ballTrail = [];
+  let audioContext = null;
   let activePointerId = null;
   let isDragging = false;
   let lastFrameTime = performance.now();
@@ -38,6 +44,7 @@
   const rest = { x: 180, y: 560 };
   const hoop = {
     x: 180,
+    baseX: 180,
     rimY: 155,
     width: 112,
     backboardWidth: 148,
@@ -117,6 +124,7 @@
     rest.y = height - clamp(height * 0.13, 78, 112);
 
     hoop.x = width / 2;
+    hoop.baseX = hoop.x;
     hoop.rimY = clamp(height * 0.255, 128, 215);
     hoop.width = clamp(width * 0.32, 96, 132);
     hoop.backboardWidth = clamp(width * 0.43, 132, 178);
@@ -139,9 +147,14 @@
     return height * 1.75;
   }
 
-  function resetBall(shouldDraw = true) {
+  function resetBall(shouldDraw = true, wasMiss = false) {
+    if (wasMiss) {
+      streak = 0;
+    }
+
     isDragging = false;
     activePointerId = null;
+    rest.x = clamp(width / 2 + (Math.random() - 0.5) * width * 0.16, ball.radius + 4, width - ball.radius - 4);
     ball.x = rest.x;
     ball.y = rest.y;
     ball.previousX = ball.x;
@@ -158,11 +171,54 @@
     }
   }
 
+  function getAudioContext() {
+    if (!audioContext) {
+      try {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (_error) {
+        return null;
+      }
+    }
+    if (audioContext.state === "suspended") {
+      audioContext.resume().catch(() => {});
+    }
+    return audioContext;
+  }
+
+  function playSound(type) {
+    const audio = getAudioContext();
+    if (!audio) return;
+
+    const now = audio.currentTime;
+    const oscillator = audio.createOscillator();
+    const gain = audio.createGain();
+    const settings = {
+      launch: { start: 180, end: 90, duration: 0.12, volume: 0.045, wave: "triangle" },
+      score: { start: 520, end: 920, duration: 0.22, volume: 0.07, wave: "sine" },
+      finish: { start: 260, end: 110, duration: 0.38, volume: 0.06, wave: "sawtooth" },
+    }[type];
+
+    oscillator.type = settings.wave;
+    oscillator.frequency.setValueAtTime(settings.start, now);
+    oscillator.frequency.exponentialRampToValueAtTime(settings.end, now + settings.duration);
+    gain.gain.setValueAtTime(settings.volume, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + settings.duration);
+    oscillator.connect(gain).connect(audio.destination);
+    oscillator.start(now);
+    oscillator.stop(now + settings.duration);
+  }
+
   function startGame() {
+    getAudioContext();
     score = 0;
     timeLeft = GAME_SECONDS;
     timerStarted = false;
     timerStartTime = 0;
+    bonusTime = 0;
+    streak = 0;
+    hoopMotionTime = 0;
+    floatingEffects = [];
+    ballTrail = [];
     messageUntil = 0;
     hideMessage();
     setScreen("playing");
@@ -185,6 +241,7 @@
     }
 
     timeLeft = 0;
+    playSound("finish");
     updateHud();
     hideMessage();
 
@@ -336,7 +393,9 @@
     ball.scored = false;
     ball.shotStartedAt = now;
     ball.resetAt = 0;
+    ballTrail = [];
     ball.state = "flying";
+    playSound("launch");
   }
 
   function updateGame(deltaTime, now) {
@@ -354,6 +413,9 @@
       hideMessage();
     }
 
+    updateHoop(deltaTime);
+    updateFloatingEffects(deltaTime, now);
+
     if (ball.state === "flying" || ball.state === "scored") {
       ball.previousX = ball.x;
       ball.previousY = ball.y;
@@ -361,6 +423,11 @@
       ball.vx *= Math.pow(0.998, deltaTime * 60);
       ball.x += ball.vx * deltaTime;
       ball.y += ball.vy * deltaTime;
+
+      if (streak >= 2 && ball.state === "flying") {
+        ballTrail.push({ x: ball.x, y: ball.y, life: 1 });
+        if (ballTrail.length > 12) ballTrail.shift();
+      }
 
       keepBallInsideSideWalls();
 
@@ -374,9 +441,38 @@
       if (ball.state === "scored" && now >= ball.resetAt) {
         resetBall(false);
       } else if (ball.state === "flying" && (outOfBounds || tooLate)) {
-        resetBall(false);
+        resetBall(false, true);
       }
     }
+  }
+
+  function updateHoop(deltaTime) {
+    if (score < 3) {
+      hoop.x = hoop.baseX;
+      return;
+    }
+
+    hoopMotionTime += deltaTime;
+    const speed = score >= 7 ? 1.65 : 1.05;
+    const amplitude = Math.min(width * 0.22, 94);
+    hoop.x = hoop.baseX + Math.sin(hoopMotionTime * speed) * amplitude;
+  }
+
+  function updateFloatingEffects(deltaTime, now) {
+    floatingEffects = floatingEffects.filter((effect) => effect.until > now);
+    for (const effect of floatingEffects) {
+      effect.y -= 28 * deltaTime;
+    }
+}
+
+  function addFloatingEffect(text, color) {
+    floatingEffects.push({
+      text,
+      x: width / 2,
+      y: hoop.rimY - 24,
+      color,
+      until: performance.now() + 800,
+    });
   }
 
   function updateTimer(now) {
@@ -386,7 +482,7 @@
       return;
     }
 
-    timeLeft = Math.max(0, GAME_SECONDS - (now - timerStartTime) / 1000);
+    timeLeft = Math.max(0, GAME_SECONDS + bonusTime - (now - timerStartTime) / 1000);
     updateHud();
 
     if (timeLeft <= 0) {
@@ -422,8 +518,20 @@
     ball.state = "scored";
     ball.resetAt = now + 620;
     score += 1;
+    streak += 1;
+    bonusTime += 2;
+    timeLeft += 2;
+    addFloatingEffect("+2s", "#77f29a");
+    playSound("score");
+
+    if (streak >= 3) {
+      showMessage("¡En llamas!");
+    } else if (streak >= 2) {
+      showMessage(`¡Racha x${streak}!`);
+    } else {
+      showMessage("¡Canasta!");
+    }
     updateHud();
-    showMessage("¡Canasta!");
   }
 
   function drawGame() {
@@ -435,7 +543,9 @@
       drawAimGuide();
     }
 
+    drawBallTrail();
     drawBall(ball.x, ball.y, ball.radius);
+    drawFloatingEffects();
     drawHoopFront();
 
     if (screen === "playing" && !timerStarted && ball.state === "ready") {
@@ -542,6 +652,39 @@
     ctx.beginPath();
     ctx.ellipse(hoop.x, hoop.rimY - 1, hoop.width / 2 - 2, rimHeight - 2, 0, Math.PI, Math.PI * 2);
     ctx.stroke();
+  }
+
+  function drawBallTrail() {
+    if (streak < 2 || ballTrail.length === 0) return;
+
+    ctx.save();
+    for (let index = 0; index < ballTrail.length; index += 1) {
+      const point = ballTrail[index];
+      const strength = (index + 1) / ballTrail.length;
+      ctx.globalAlpha = strength * 0.55;
+      ctx.fillStyle = index % 2 === 0 ? "#ffcf4a" : "#f05a28";
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, ball.radius * (0.18 + strength * 0.32), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawFloatingEffects() {
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `900 ${clamp(width * 0.06, 20, 28)}px system-ui, sans-serif`;
+    for (const effect of floatingEffects) {
+      const alpha = clamp((effect.until - performance.now()) / 800, 0, 1);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = effect.color;
+      ctx.strokeStyle = "rgba(5, 42, 49, 0.42)";
+      ctx.lineWidth = 4;
+      ctx.strokeText(effect.text, effect.x, effect.y);
+      ctx.fillText(effect.text, effect.x, effect.y);
+    }
+    ctx.restore();
   }
 
   function drawBall(x, y, radius) {
