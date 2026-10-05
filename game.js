@@ -300,7 +300,9 @@
   }
 
   function onPointerCancel(event) {
-    if (event.pointerId !== activePointerId) {
+    // Al soltar un puntero, algunos navegadores emiten después
+    // `lostpointercapture`. No debemos cancelar un lanzamiento que ya salió.
+    if (!isDragging || ball.state !== "dragging" || event.pointerId !== activePointerId) {
       return;
     }
 
